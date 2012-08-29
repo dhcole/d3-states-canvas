@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<script src="http://mbostock.github.com/d3/d3.v2.js?2.8.1"></script>
+<script src="http://api.tiles.mapbox.com/mapbox.js/v0.6.4/mapbox.js"></script>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js"></script>
+<link href="http://api.tiles.mapbox.com/mapbox.js/v0.6.4/mapbox.css" rel="stylesheet" />
+<style>
+
+#map {
+  width: 960px;
+  height: 500px;
+  position: relative;
+}
+
+#tiles, #vector {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+#tiles {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.background {
+  fill: none;
+  pointer-events: all;
+}
+
+#states path {
+  fill: rgba(90,90,255,0.25);
+  stroke: #fff;
+  stroke-width: 1px;
+  cursor: pointer;
+}
+
+#states path:hover {
+  stroke-width: 2px;
+}
+
+</style>
+<body>
+
+<div id="map">
+    <div id="tiles"></div>
+    <div id="vector"></div>        
+</div>
+
+<a href="#" id="grid">Grid</a>
+
+<script>
+
+$(function() {
+
+    var m,
+        b;    
+    
+    var width = $('#map').width(),
+        height = $('#map').height(),
+        centered,
+        merc = false,
+        grid = false,
+        timer = 250;
+    
+    var projection = d3.geo.albersUsa()
+        .scale(width)
+        .translate([width / 2, height / 2]);
+    
+    var path = d3.geo.path()
+        .projection(projection);
+    
+    var svg = d3.select("#vector").append("svg")
+        .attr("width", width)
+        .attr("height", height);
+    
+    var states = svg.append("g")
+        .attr("id", "states");
+
+
+    // Set up tiled map
+    mapbox.auto('tiles', 'dhcole.map-fb626xcd', function(map) {
+        m = map;
+        map.ui.zoomer.remove();
+        map.center({ lon: -98, lat: 38 }).zoom(6);
+    });
+    b = mapbox.map('tiles').center({ lon: -98, lat: 38 }).zoom(6);
+
+    // Set up vector map
+    states.append("rect")
+        .attr("class", "background")
+        .attr("width", width)
+        .attr("height", height)
+        .on("click", click);
+
+    // Get vector data
+    d3.json("us-states.json", function(json) {
+        states.selectAll("path")
+            .data(json.features)
+            .enter().append("path")
+            .attr('id', function(d) { return d.id})
+            .attr("d", path)
+            .on("click", click);
+    });
+
+    // Zoom in, center, reproject, and show tiles on click
+    function click(d) {
+        var centroid = [],
+            center = [];
+    
+        // If the click was on the centered state or the background, re-center.
+        // Otherwise, center the clicked-on state.
+        if (!d || centered === d) {
+            projection = d3.geo.albersUsa()
+                .scale(width)
+                .translate([width / 2, height / 2]);
+    
+            path.projection(projection);
+    
+            centered = null;
+    
+            merc = false;
+    
+            $('#tiles').animate({opacity: 0}, timer / 3);
+
+        } else {
+            var spherical = function(x) {
+                var point = b.locationPoint({ lat: x[1], lon: x[0] });
+                return [point.x, point.y];
+            };
+    
+            // Get centroid coordinates
+            // Can be optimized by adding centroids to the data
+            if (merc) {
+                projection = spherical;
+                projection.invert = function(x) {
+                    var point = b.pointLocation({ x: x[0], y: x[1] });
+                    return [point.lon, point.lat];
+                }
+            } else {
+                projection = d3.geo.albers();
+            }
+            centroid = path.centroid(d);
+            center = projection.invert([centroid[0], centroid[1]]);
+    
+            // Set projection to mercator
+            projection = spherical;
+            path.projection(projection);
+    
+            // Set new center point
+            centroid = path.centroid(d);
+            centered = d;
+    
+            // Position projection map
+            b.center({ lat: center[1], lon: center[0] });
+    
+            // Position base map
+            if (merc) {
+                m.ease.location({ lat: center[1], lon: center[0] })
+                    .zoom(6)
+                    .easing('easeInOut')
+                    // Fail-safe incase easey doesn't finish
+                    .run(timer, window.setTimeout(function() {
+                        m.center({ lat: center[1], lon: center[0] });
+                    }, 0));
+            } else {
+                m.center({ lat: center[1], lon: center[0] });
+            }
+    
+            // Show tiles
+            window.setTimeout(function() {
+                $('#tiles').animate({ opacity: 1 }, timer / 3);
+            }, timer * 2/3);
+    
+            merc = true;
+        }
+    
+        // Transition to the new projection.
+        states.selectAll("path").transition()
+            .ease(function(t) { return (1 - Math.cos(Math.PI * t)) / 2; })
+            .duration(timer)
+            .attr("d", path);
+    }
+
+    // Grid features (will be the grid soon)
+    $('#grid').click(function(e) {
+        e.preventDefault();
+        if (grid) {
+            states.selectAll("path")
+                .transition()
+                .duration(timer)
+                .attr('transform', '');
+            grid = false;
+        } else {
+            states.selectAll("path")
+                .sort(function(a,b) {
+                    return path.area(a) - path.area(b);
+                })
+                .transition()
+                .duration(timer)
+                .attr('transform', gridLayout);
+            grid = true;
+        }
+    });
+
+    function gridLayout(d, i) {
+        i++; // Adjust index to 1 based instead of 0 based
+        var centroid = path.centroid(d),
+            cols = 10,
+            rows = 6,
+            col = (i % cols) ? (i % cols) : cols,
+            row = (Math.floor(i / cols) !== i / cols) ? Math.floor(i / cols) + 1
+                : Math.floor(i / cols);
+
+        return 'translate(' + (1 - centroid[0]) + ',' + (1 - centroid[1]) + ')' +
+            'translate(' + (width / cols * col) + ',' + (height / rows * row) + ')';
+    }
+});
+
+</script>
